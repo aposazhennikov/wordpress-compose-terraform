@@ -1,0 +1,222 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: true
+
+users:
+  - name: app
+    lock_passwd: true
+    shell: /bin/bash
+    uid: 1001
+    ssh_authorized_keys: YOUR KEY
+
+packages:
+  - wget
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - unattended-upgrades
+
+runcmd:
+  - export HOME_APP="/home/app"
+  - export MY_IP=$(hostname -I | awk '{print $1}')
+  - echo "Hello world!!! $HOME_APP $MY_IP"
+  - curl -fsSL https://download.docker.com/linux/debian/gpg |  gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" |  tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - apt update
+  - apt install -y docker-ce docker-ce-cli containerd.io
+  - curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  - systemctl start docker
+  - systemctl enable docker
+  - chmod +x /usr/local/bin/docker-compose
+  - usermod -aG docker app
+  - wget https://wordpress.org/latest.tar.gz -P $HOME_APP
+  - tar -xzvf $HOME_APP/latest.tar.gz -C $HOME_APP
+  - chown -R app:app $HOME_APP
+  - chmod 755 -R $HOME_APP
+  - sed -i "s/\$MY_IP/${MY_IP}/g" /home/app/nginx-conf.d/_.conf
+  - cd $HOME_APP
+  - docker-compose up -d --build
+  - sleep 60
+  - docker restart nginx
+  - docker-compose up -d --build
+  - docker ps -a
+
+
+write_files:
+  - path: /home/app/nginx-conf.d/_.conf
+    content: |
+      server {
+          server_name $MY_IP;
+          listen 80;
+          root /var/www/html;
+          
+          location ~ /.well-known/acme-challenge {
+          allow all;
+          }
+
+          index index.php index.html index.htm;
+          
+          location / {
+          proxy_pass http://nginx-unit:9000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      }
+      }
+    owner: "app:app"
+    permissions: "0755"
+    defer: true
+
+  - path: /home/app/docker-compose.yml
+    content: |
+      services:
+        nginx-unit:
+          container_name: unit
+          build: .
+          ports:
+            - "9000:9000"
+          volumes:
+            - ./config.json:/docker-entrypoint.d/config.json
+            - ./wordpress:/var/www/html
+          depends_on:
+            - mysql
+          env_file: .env
+
+        nginx:
+          container_name: nginx
+          image: nginx:latest
+          ports:
+            - "80:80"
+            - "443:443"
+          restart: unless-stopped
+          volumes:
+            - ./nginx-conf.d:/etc/nginx/conf.d
+            - ./wordpress:/var/www/html
+            - etc-letsencrypt:/etc/letsencrypt
+          depends_on:
+            - nginx-unit
+        mysql:
+          container_name: mysql
+          image: mysql:latest
+          restart: unless-stopped
+          command: '--default-authentication-plugin=mysql_native_password'
+          env_file: .env
+          volumes:
+            - dbfile:/var/lib/mysql
+        #certbot:
+        #  container_name: certbot
+        #  image: certbot/certbot:latest
+        #  depends_on:
+        #    - nginx
+        #  env_file: .env
+        #  command:  certonly -v --webroot --webroot-path=/var/www/html --email ${EMAIL} --agree-tos --no-eff-email -d ${DOMAIN}
+        #  volumes:
+        #    - etc-letsencrypt:/etc/letsencrypt
+        #    - ./wordpress:/var/www/html
+      volumes:
+          etc-letsencrypt:
+          dbfile:
+    owner: "app:app"
+    permissions: "0755"
+    defer: true
+
+  - path: /home/app/.env
+    content: |
+      MYSQL_ROOT_PASSWORD=your_root_password
+      MYSQL_USER=your_mysql_user_which_you_will_use_while_installation_wp
+      MYSQL_PASSWORD=your_mysql_password_which_you_will_use_while_installation_wp
+      MYSQL_DATABASE=name_of_yous_db
+      EMAIL=your_email_for_certbot
+      DOMAIN=your_domain_for_certbot
+      
+    owner: "app:app"
+    permissions: "0755"
+    defer: true
+
+  - path: /home/app/Dockerfile
+    content: |
+      FROM unit:1.31.1-php8.2
+
+      RUN apt update && apt install libzip-dev -y && groupadd -g 1001 app && useradd --uid 1001 --gid 1001 app && chown -R app:app /var/www/html && docker-php-ext-install zip mysqli
+
+    owner: "app:app"
+    permissions: "0755"
+    defer: true
+
+  - path: /home/app/config.json
+    content: |
+      {"listeners": {
+            "*:9000": {
+                "pass": "routes/wordpress"
+                  }},
+        "routes": {
+            "wordpress": [
+                {"match": {
+                      "uri": [
+                            "*.php",
+                            "*.php/*",
+                            "/wp-admin/"
+                               ]},
+        "action": {
+              "pass": "applications/wordpress/direct"
+                            }},
+        {"action": {
+              "share": "/var/www/html/$uri",
+              "fallback": {
+              "pass": "applications/wordpress/index"}}}]},
+        "applications": {
+                  "wordpress": {
+                          "type": "php",
+                          "user": "app",
+                          "group": "app",
+                          "targets": {
+                                  "direct": {
+                                          "root": "/var/www/html/"
+                                  },
+                                  "index": {
+                                          "root": "/var/www/html/",
+                                          "script": "index.php"}}}}}
+    owner: "app:app"
+    permissions: "0755"
+    defer: true
+
+  - path: /home/app/wordpress/config.json
+    content: |
+      {"listeners": {
+            "*:9000": {
+                "pass": "routes/wordpress"
+                  }},
+        "routes": {
+            "wordpress": [
+                {"match": {
+                      "uri": [
+                            "*.php",
+                            "*.php/*",
+                            "/wp-admin/"
+                               ]},
+        "action": {
+              "pass": "applications/wordpress/direct"
+                            }},
+        {"action": {
+              "share": "/var/www/html/$uri",
+              "fallback": {
+              "pass": "applications/wordpress/index"}}}]},
+        "applications": {
+                  "wordpress": {
+                          "type": "php",
+                          "user": "app",
+                          "group": "app",
+                          "targets": {
+                                  "direct": {
+                                          "root": "/var/www/html/"
+                                  },
+                                  "index": {
+                                          "root": "/var/www/html/",
+                                          "script": "index.php"}}}}}
+    owner: "app:app"
+    permissions: "0755"
+    defer: true
