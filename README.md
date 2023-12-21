@@ -17,6 +17,7 @@ Docker-compose contains: nginx-unit(builded from Dockerfile) witt php-fpm8.2, ng
 # IMPORTANT! PLEASE CHANGE PASSWORD AND USER FOR MYSQL IN cloud-config.yml  #
 
 * First of all you should set your do token in ENV "export do_token='your_digital_ocean_token'" - linux/ $env:do_token='your_digital_ocean_token' - powershell/set do_token='your_digital_ocean_token' in CMD.exe
+* 'cd /your/terraform/project/path/dir'
 * Than use 'terraform init' to init your project
 * Next step is to plan your deploy 'terraform plan'
 * 'terraform apply' -> yes
